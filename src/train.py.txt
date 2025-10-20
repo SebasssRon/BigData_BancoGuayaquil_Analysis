@@ -1,0 +1,111 @@
+# src/train.py
+import os
+import sys
+import joblib
+import pandas as pd
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.dummy import DummyClassifier
+
+# Si ejecutas desde la raíz, aseguramos que caracteres en src se encuentren:
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from preprocessing import load_data, split_X_y, scale_split
+
+def train_pipeline(data_path, save_model_path=None):
+    # Cargar y examinar
+    df = load_data(data_path)
+    print("Shape:", df.shape)
+    print(df.head())
+    print(df.info())
+    if 'is_ultra' in df.columns:
+        print(df['is_ultra'].value_counts())
+
+    X, y = split_X_y(df, target='is_ultra')
+
+    # División: train+val / test y luego train / val (estratificado)
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
+    )
+
+    # Escalado para modelos lineales
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+
+    # Baseline
+    dummy = DummyClassifier(strategy="most_frequent")
+    dummy.fit(X_train_scaled, y_train)
+    print("Baseline precision:", accuracy_score(y_test, dummy.predict(X_test_scaled)))
+
+    # Modelos y grids
+    models = {
+        "LogisticRegression": (LogisticRegression(max_iter=1000, random_state=42),
+                               {"C": [0.01, 0.1, 1, 10], "penalty": ["l2"], "solver": ["lbfgs"]}),
+        "RandomForest": (RandomForestClassifier(random_state=42),
+                         {"n_estimators": [50, 100, 200], "max_depth": [None, 5, 10], "min_samples_split": [2, 5]}),
+        "GradientBoosting": (GradientBoostingClassifier(random_state=42),
+                             {"n_estimators": [50, 100, 200], "learning_rate": [0.01, 0.1, 0.2], "max_depth": [3, 5]})
+    }
+
+    best_models = {}
+    results = []
+
+    for name, (model, params) in models.items():
+        print("Ajustando", name)
+        gs = GridSearchCV(model, params, cv=5, scoring='accuracy', n_jobs=-1)
+        if name in ["RandomForest", "GradientBoosting"]:
+            gs.fit(X_train, y_train)
+            val_pred = gs.predict(X_val)
+        else:
+            gs.fit(X_train_scaled, y_train)
+            val_pred = gs.predict(X_val_scaled)
+        val_acc = accuracy_score(y_val, val_pred)
+        print(name, "mejores parametros", gs.best_params_, "precision de validacion", val_acc)
+        best_models[name] = gs.best_estimator_
+        results.append((name, gs.best_params_, val_acc))
+
+    # Seleccionamos mejor por validación
+    best_name = max(results, key=lambda x: x[2])[0]
+    best_model = best_models[best_name]
+    print("Mejor modelo por validación:", best_name)
+
+    # Reentrenamos en train+val y evaluamos en test
+    if best_name in ["RandomForest", "GradientBoosting"]:
+        best_model.fit(pd.concat([X_train, X_val]), pd.concat([y_train, y_val]))
+        y_test_pred = best_model.predict(X_test)
+    else:
+        X_train_val_scaled = scaler.fit_transform(pd.concat([X_train, X_val]))
+        best_model.fit(X_train_val_scaled, pd.concat([y_train, y_val]))
+        X_test_scaled_final = scaler.transform(X_test)
+        y_test_pred = best_model.predict(X_test_scaled_final)
+
+    print("Test precision final:", accuracy_score(y_test, y_test_pred))
+    print(classification_report(y_test, y_test_pred))
+    print("Confusion matrix:\n", confusion_matrix(y_test, y_test_pred))
+
+    # Prueba simple con 'mb_used' si existe
+    if 'mb_used' in X.columns:
+        rf_simple = RandomForestClassifier(n_estimators=100, random_state=42)
+        rf_simple.fit(X_train[['mb_used']], y_train)
+        print("Precision solo de 'mb_used':", accuracy_score(y_test, rf_simple.predict(X_test[['mb_used']])))
+
+    # Guardar modelo y scaler
+    if save_model_path:
+        os.makedirs(os.path.dirname(save_model_path), exist_ok=True)
+        joblib.dump({'model': best_model, 'scaler': scaler}, save_model_path)
+        print("Modelo guardado en:", save_model_path)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--data_path', type=str, default='data/users_behavior.csv')
+    parser.add_argument('--save_model', type=str, default='models/best_model.joblib')
+    args = parser.parse_args()
+    train_pipeline(args.data_path, args.save_model)

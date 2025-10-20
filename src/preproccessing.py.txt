@@ -1,0 +1,22 @@
+# src/preprocessing.py
+import pandas as pd
+from sklearn.preprocessing import StandardScaler
+
+def load_data(path):
+    """Carga dataset desde CSV."""
+    df = pd.read_csv(path)
+    return df
+
+def split_X_y(df, target='is_ultra'):
+    """Separa X e y."""
+    X = df.drop(columns=[target])
+    y = df[target]
+    return X, y
+
+def scale_split(X_train, X_val, X_test):
+    """Ajusta StandardScaler en X_train y transforma X_val y X_test."""
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+    return scaler, X_train_scaled, X_val_scaled, X_test_scaled
